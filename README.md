@@ -176,7 +176,6 @@ data_governance_pipeline/
 │   ├── cli.py              # --skip-llm, --log-level
 │   └── logging_config.py
 ├── scripts/
-│   ├── run_local.ps1                 # Windows helper
 │   ├── DQ_TABLES_TEST_SCRIPT.sql     # Synthetic Snowflake test schema
 │   └── ADVISER_RULES_TEST_SCRIPT.sql # Extra IM/FP/RM test cases
 ├── environment.yml         # Conda environment
@@ -292,14 +291,6 @@ Useful flags:
 python main.py --skip-llm
 python main.py --log-level DEBUG
 python main.py --skip-llm --log-level WARNING
-```
-
-On Windows you can also use:
-
-```powershell
-.\scripts\run_local.ps1
-.\scripts\run_local.ps1 -SkipLlm
-.\scripts\run_local.ps1 -LogLevel DEBUG
 ```
 
 On success the console prints tables scanned, total issues, report path, and log path.
