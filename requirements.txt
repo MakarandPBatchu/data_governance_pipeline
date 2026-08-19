@@ -1,0 +1,29 @@
+# Data governance pipeline — direct dependencies
+# Install: pip install -r requirements.txt
+# Conda env: conda env create -f environment.yml
+
+# Snowflake connectivity (includes pandas extra for fetch_pandas_all)
+snowflake-connector-python[pandas]==4.7.1
+pyarrow==23.0.1
+
+# Data processing & Excel export
+pandas==2.3.3
+numpy==2.5.1
+openpyxl==3.1.5
+
+# Configuration
+PyYAML==6.0.3
+python-dotenv==1.2.2
+
+# Local Llama 3.2 via Ollama
+ollama==0.6.2
+httpx==0.28.1
+pydantic==2.13.4
+
+# Utilities
+tenacity==9.1.4
+tqdm==4.70.0
+
+# Snowflake / HTTP support (explicit for reproducibility)
+cryptography==50.0.0
+requests==2.34.2

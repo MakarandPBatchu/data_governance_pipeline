@@ -1,0 +1,122 @@
+# Business-specific data quality and governance rules.
+# Each rule defines a SQL query that MUST return:
+#   - All primary key / identifier columns (aliased clearly)
+#   - A column named ISSUE_TYPE (string)
+#   - A column named ISSUE_DETAIL (string describing the specific violation)
+#
+# Customize table/column names to match your Snowflake schema.
+# Disabled rules (enabled: false) are skipped until you configure them.
+
+rules:
+  - id: archived_client_with_aum
+    name: "Archived clients still showing AUM"
+    description: "Clients marked as archived should not have active assets under management"
+    enabled: true
+    severity: high
+    table: CLIENTS
+    primary_key:
+      - CLIENT_ID
+    sql: |
+      SELECT
+          c.CLIENT_ID,
+          c.CLIENT_STATUS,
+          c.AUM,
+          'archived_client_with_aum' AS ISSUE_TYPE,
+          'Client is archived but AUM = ' || COALESCE(CAST(c.AUM AS VARCHAR), 'NULL') AS ISSUE_DETAIL
+      FROM {database}.{schema}.CLIENTS c
+      WHERE UPPER(c.CLIENT_STATUS) = 'ARCHIVED'
+        AND COALESCE(c.AUM, 0) > 0
+
+  - id: pre_2017_client_not_deleted
+    name: "Clients listed prior to 2017 should be deleted"
+    description: "Legacy clients created before 2017 should no longer exist in active tables"
+    enabled: true
+    severity: high
+    table: CLIENTS
+    primary_key:
+      - CLIENT_ID
+    sql: |
+      SELECT
+          c.CLIENT_ID,
+          c.CREATED_DATE,
+          c.CLIENT_STATUS,
+          'pre_2017_client_not_deleted' AS ISSUE_TYPE,
+          'Client created ' || TO_VARCHAR(c.CREATED_DATE, 'YYYY-MM-DD') || ' but still present' AS ISSUE_DETAIL
+      FROM {database}.{schema}.CLIENTS c
+      WHERE c.CREATED_DATE < '2017-01-01'
+        AND COALESCE(c.IS_DELETED, FALSE) = FALSE
+
+  - id: invalid_im_fp
+    name: "Clients missing or with invalid IM / FP adviser"
+    description: "Each client must have at least one valid IM or FP assigned; invalid codes are flagged"
+    enabled: true
+    severity: medium
+    table: CLIENTS
+    primary_key:
+      - CLIENT_ID
+    sql: |
+      SELECT
+          c.CLIENT_ID,
+          c.IM_CODE,
+          c.FP_CODE,
+          'invalid_im_fp' AS ISSUE_TYPE,
+          CASE
+              WHEN c.IM_CODE IS NULL AND c.FP_CODE IS NULL
+                  THEN 'Missing IM and FP — at least one adviser required'
+              WHEN c.IM_CODE IS NOT NULL AND im.ADVISER_ID IS NULL
+                  THEN 'Invalid IM code: ' || c.IM_CODE
+              WHEN c.FP_CODE IS NOT NULL AND fp.ADVISER_ID IS NULL
+                  THEN 'Invalid FP code: ' || c.FP_CODE
+              ELSE 'Invalid IM/FP assignment'
+          END AS ISSUE_DETAIL
+      FROM {database}.{schema}.CLIENTS c
+      LEFT JOIN {database}.{schema}.ADVISERS im ON c.IM_CODE = im.ADVISER_CODE
+      LEFT JOIN {database}.{schema}.ADVISERS fp ON c.FP_CODE = fp.ADVISER_CODE
+      WHERE COALESCE(c.IS_DELETED, FALSE) = FALSE
+        AND (
+            (c.IM_CODE IS NULL AND c.FP_CODE IS NULL)
+            OR (c.IM_CODE IS NOT NULL AND im.ADVISER_ID IS NULL)
+            OR (c.FP_CODE IS NOT NULL AND fp.ADVISER_ID IS NULL)
+        )
+
+  - id: invalid_rm
+    name: "Clients missing or with invalid Relationship Manager (RM)"
+    description: "Every client must have a valid RM code assigned in the reference adviser table"
+    enabled: true
+    severity: medium
+    table: CLIENTS
+    primary_key:
+      - CLIENT_ID
+    sql: |
+      SELECT
+          c.CLIENT_ID,
+          c.RM_CODE,
+          'invalid_rm' AS ISSUE_TYPE,
+          CASE
+              WHEN c.RM_CODE IS NULL
+                  THEN 'Missing RM code — Relationship Manager required'
+              WHEN rm.ADVISER_ID IS NULL
+                  THEN 'Invalid RM code: ' || c.RM_CODE
+              ELSE 'Invalid RM assignment'
+          END AS ISSUE_DETAIL
+      FROM {database}.{schema}.CLIENTS c
+      LEFT JOIN {database}.{schema}.ADVISERS rm ON c.RM_CODE = rm.ADVISER_CODE
+      WHERE COALESCE(c.IS_DELETED, FALSE) = FALSE
+        AND (
+            c.RM_CODE IS NULL
+            OR rm.ADVISER_ID IS NULL
+        )
+
+  - id: duplicate_primary_key
+    name: "Duplicate primary key values"
+    description: "Duplicate PK values detected during profiling"
+    enabled: true
+    severity: critical
+    dynamic: true
+
+  - id: high_null_rate
+    name: "Column exceeds null rate threshold"
+    description: "Column has unusually high null percentage"
+    enabled: true
+    severity: low
+    dynamic: true

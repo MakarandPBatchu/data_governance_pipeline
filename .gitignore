@@ -1,0 +1,9 @@
+.env
+*.pyc
+__pycache__/
+.venv/
+output/
+logs/
+*.xlsx
+.pytest_cache/
+.mypy_cache/
