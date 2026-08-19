@@ -12,8 +12,8 @@ from src.pipeline import DataGovernancePipeline
 # TO DO: 
 # 1. TEST FOR MORE NUMBER OF ROWS PER TABLES
 # 2. SEE WHAT MORE DYNAMIC RULES CAN BE ADDED
+# 3. Add a .md file for documentation of the pipeline and how to use it
 # 4. HOW TO MAKE BUSINESS RULES MORE DYNAMIC AND EASY TO ADD/REMOVE/EDIT
-# 5. RULE TO CHECK AND FLAG ANY ROWS WITH NULL VALUES IN RM COLUMN
 def main() -> int:
     """Run the data governance pipeline and print a summary.
 
