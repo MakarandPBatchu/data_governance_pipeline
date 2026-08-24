@@ -1,0 +1,29 @@
+{
+    "python.envFile": "${workspaceFolder}/.env",
+    "python.defaultInterpreterPath": "${userHome}/anaconda3/envs/data_gov_agent/python.exe",
+    "python.terminal.activateEnvironment": true,
+    "python.terminal.activateEnvInCurrentTerminal": true,
+    "terminal.integrated.defaultProfile.windows": "PowerShell (conda)",
+    "terminal.integrated.profiles.windows": {
+        "PowerShell (conda)": {
+            "source": "PowerShell",
+            "args": [
+                "-NoExit",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-Command",
+                ". '${workspaceFolder}/.vscode/conda_startup.ps1'"
+            ]
+        }
+    },
+    "terminal.integrated.automationProfile.windows": {
+        "path": "powershell.exe",
+        "args": [
+            "-NoExit",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-Command",
+            ". '${workspaceFolder}/.vscode/conda_startup.ps1'"
+        ]
+    }
+}
