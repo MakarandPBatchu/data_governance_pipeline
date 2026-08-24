@@ -27,3 +27,6 @@ tqdm==4.70.0
 # Snowflake / HTTP support (explicit for reproducibility)
 cryptography==50.0.0
 requests==2.34.2
+
+# VS Code / Cursor debugger
+debugpy==1.8.21

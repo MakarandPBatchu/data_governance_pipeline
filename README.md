@@ -176,8 +176,13 @@ data_governance_pipeline/
 │   ├── cli.py              # --skip-llm, --log-level
 │   └── logging_config.py
 ├── scripts/
-│   ├── DQ_TABLES_TEST_SCRIPT.sql     # Synthetic Snowflake test schema
-│   └── ADVISER_RULES_TEST_SCRIPT.sql # Extra IM/FP/RM test cases
+│   └── snowflake_synthetic_data/
+│       ├── DQ_TABLES_TEST_SCRIPT.sql     # Synthetic Snowflake test schema
+│       └── ADVISER_RULES_TEST_SCRIPT.sql # Extra IM/FP/RM test cases
+├── .vscode/
+│   ├── launch.json         # Debug configs (with / without LLM)
+│   ├── settings.json       # Default conda interpreter and terminal activation
+│   └── conda_startup.ps1   # Reads CONDA_ENV_NAME from .env, runs conda activate
 ├── environment.yml         # Conda environment
 ├── requirements.txt        # pip pin file
 └── .env.example            # Credential template (copy to .env)
@@ -228,10 +233,11 @@ Copy the example env file and fill in your values. Do not commit `.env`.
 copy .env.example .env
 ```
 
-Required variables:
+Fill Snowflake and Ollama values. `CONDA_ENV_NAME` is used by Cursor/VS Code to activate conda; `main.py` does not read it.
 
 | Variable | Purpose |
 |---|---|
+| `CONDA_ENV_NAME` | Conda env to activate in Cursor/VS Code terminals (`data_gov_agent` by default; must match `name:` in `environment.yml`) |
 | `SNOWFLAKE_ACCOUNT` | Snowflake account identifier |
 | `SNOWFLAKE_USER` | User name |
 | `SNOWFLAKE_PASSWORD` | Password |
@@ -254,8 +260,8 @@ Confirm Ollama is running (typically `ollama serve` or the desktop app).
 
 To try the pipeline without production data, run in a Snowflake worksheet:
 
-1. `scripts/DQ_TABLES_TEST_SCRIPT.sql` — creates `DQ_TEST_DB.DQ_TEST_SCHEMA` with sample `CLIENTS`, `ADVISERS`, and related tables seeded with known issues
-2. `scripts/ADVISER_RULES_TEST_SCRIPT.sql` — extra IM/FP/RM scenarios
+1. `scripts/snowflake_synthetic_data/DQ_TABLES_TEST_SCRIPT.sql` — creates `DQ_TEST_DB.DQ_TEST_SCHEMA` with sample `CLIENTS`, `ADVISERS`, and related tables seeded with known issues
+2. `scripts/snowflake_synthetic_data/ADVISER_RULES_TEST_SCRIPT.sql` — extra IM/FP/RM scenarios
 
 Then set `.env` to:
 
@@ -294,6 +300,27 @@ python main.py --skip-llm --log-level WARNING
 ```
 
 On success the console prints tables scanned, total issues, report path, and log path.
+
+### 7. Debug in VS Code / Cursor
+
+Use the launch configurations in `.vscode/launch.json`. They load `.env` and run `main.py` with the `data_gov_agent` conda interpreter.
+
+| Configuration | What it runs |
+|---|---|
+| **Run main.py (no LLM)** | `python main.py --skip-llm` — Snowflake scan and Excel report only |
+| **Run main.py (with LLM)** | `python main.py` — full run including Ollama |
+
+Select **Run main.py (no LLM)** and start debugging (F5). That is the faster path for connectivity and rule changes.
+
+Workspace settings in `.vscode/settings.json` point the editor at the same conda env and open terminals with `.vscode/conda_startup.ps1`. That script reads `CONDA_ENV_NAME` from `.env` and runs `conda activate <name>` so the integrated terminal (and the debug terminal) use the project environment.
+
+If your Conda install is not under `%USERPROFILE%\anaconda3`, or you renamed the env, update:
+
+1. `CONDA_ENV_NAME` in `.env` (used by `conda_startup.ps1`)
+2. The `python` path in `.vscode/launch.json`
+3. `python.defaultInterpreterPath` in `.vscode/settings.json`
+
+`debugpy` is listed in `requirements.txt` / `environment.yml` so the Python debugger can attach to this env.
 
 ---
 
@@ -364,6 +391,10 @@ Severity guide:
 | Rule appears as `RULE_ERROR` | SQL failed (wrong table/column names). Fix the rule; other rules still ran |
 | Empty report / no tables | Schema name, privileges on `INFORMATION_SCHEMA`, and `exclude_tables` |
 | Slow runs | Large tables: profiling issues one COUNT per column. Use `--skip-llm` or disable profiling while iterating on rules |
+| Debugger uses the wrong Python / `ModuleNotFoundError` | Select interpreter `data_gov_agent`, or confirm `.vscode/launch.json` `python` path |
+| `No module named 'debugpy'` | `pip install debugpy` in the conda env, or recreate with `environment.yml` |
+| `conda activate` fails in the terminal | Set `CONDA_ENV_NAME` in `.env` to an env from `conda env list`; start Cursor from an Anaconda Prompt if conda is not on PATH |
+| Debugpy frozen-modules warning | Harmless. Debugging still proceeds |
 
 ---
 

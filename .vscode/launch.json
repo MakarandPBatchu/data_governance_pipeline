@@ -8,6 +8,8 @@
             "program": "${workspaceFolder}/main.py",
             "console": "integratedTerminal",
             "cwd": "${workspaceFolder}",
+            "python": "${userHome}/anaconda3/envs/data_gov_agent/python.exe",
+            "envFile": "${workspaceFolder}/.env",
             "args": ["--skip-llm"]
         },
         {
@@ -16,7 +18,9 @@
             "request": "launch",
             "program": "${workspaceFolder}/main.py",
             "console": "integratedTerminal",
-            "cwd": "${workspaceFolder}"
+            "cwd": "${workspaceFolder}",
+            "python": "${userHome}/anaconda3/envs/data_gov_agent/python.exe",
+            "envFile": "${workspaceFolder}/.env"
         }
     ]
 }
