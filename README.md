@@ -14,6 +14,7 @@ This pipeline exists to:
 
 - **Discover** data quality problems across a schema, not just one table at a time
 - **Enforce** business and governance rules as versioned SQL in `config/rules.yaml`
+- **Author ad-hoc checks** in natural language via `config/custom_rules.csv` (Ollama writes the SQL)
 - **Explain** findings in plain language so non-engineers can understand impact and next steps
 - **Deliver** a repeatable Excel report for stewards, operations, and audit
 
@@ -28,6 +29,7 @@ Data never leaves your environment for LLM analysis: Ollama runs locally. Snowfl
 | Schema-wide scan | Lists base tables in the configured Snowflake database/schema and profiles each one |
 | Generic quality checks | Flags columns above a null-rate threshold and duplicate primary-key groups |
 | Business rule checks | Runs SQL rules (for example: archived clients with AUM, invalid IM/FP/RM) |
+| Custom natural-language rules | `--custom-rules` turns CSV free text into Snowflake SQL via Ollama (skips YAML + profiling) |
 | Local LLM enrichment | Adds summary, business impact, recommended fix, and governance notes per issue group |
 | Excel governance pack | Overview metrics, rule counts, table profiles, row-level issues, and table-level LLM summaries |
 | Configurable scope | Toggle profiling vs business rules, exclude tables, override primary keys, tune thresholds |
@@ -46,7 +48,7 @@ Data never leaves your environment for LLM analysis: Ollama runs locally. Snowfl
 
 **Make governance repeatable.** Rules live in YAML, credentials in environment variables, and each run produces a dated report plus a log file. That supports change control, re-runs after remediations, and evidence for data-governance programs.
 
-**Scale checks without scaling headcount.** Adding a new business rule is a YAML + SQL change, not a new one-off worksheet. The same pipeline can be pointed at a test schema or production schema by changing `.env`.
+**Scale checks without scaling headcount.** Adding a production business rule is a YAML + SQL change. Exploratory checks can be written in English in a CSV and run with `--custom-rules`. The same pipeline can be pointed at a test schema or production schema by changing `.env`.
 
 Typical stakeholders: data governance, data quality, operations, compliance, and engineering teams that own Snowflake client/adviser data.
 
@@ -55,7 +57,9 @@ Typical stakeholders: data governance, data quality, operations, compliance, and
 ## How the pipeline works
 
 ```
-.env + config/config.yaml + config/rules.yaml
+.env + config/config.yaml
+  + config/rules.yaml          (default run)
+  + config/custom_rules.csv    (--custom-rules only)
                 │
                 ▼
          main.py  (CLI)
@@ -63,20 +67,25 @@ Typical stakeholders: data governance, data quality, operations, compliance, and
                 ▼
     DataGovernancePipeline.run()
                 │
+     default:          profiling + rules.yaml SQL
+     --custom-rules:   LLM SQL from CSV only
+                       (profiling and rules.yaml skipped)
+                │
      ┌──────────┼──────────┐
      ▼          ▼          ▼
  Snowflake   Profiler   Rule engine
-  connect    (nulls,     (SQL rules
-  + list      dup PKs)    from YAML)
+  connect    (nulls,     (YAML SQL, or
+  + list      dup PKs)    generated SQL)
   tables
                 │
                 ▼
          Combine issues
                 │
                 ▼
-     Llama 3.2 via Ollama  (optional)
-     - table-level summaries
-     - issue-group enrichment
+     Llama 3.2 via Ollama
+     - custom-rule SQL generation (when --custom-rules)
+     - table-level summaries (default mode only)
+     - issue-group enrichment (unless --skip-llm)
                 │
                 ▼
      Excel report in output/
@@ -102,7 +111,7 @@ For each table, `TableProfiler` measures:
 
 Columns whose null rate exceeds `profiling.null_rate_threshold` (default 5%) become `high_null_rate` issues. Duplicate keys become `duplicate_primary_key` issues with severity **critical**.
 
-Profiling can be turned off with `rules.run_generic_profiling: false` in `config.yaml`.
+Profiling can be turned off with `rules.run_generic_profiling: false` in `config.yaml`. It is also skipped when you pass `--custom-rules`.
 
 ### 3. Business rules
 
@@ -127,7 +136,13 @@ Dynamic rules (`duplicate_primary_key`, `high_null_rate`) are metadata only; the
 
 Business rules can be turned off with `rules.run_business_rules: false`.
 
-### 4. LLM enrichment (optional)
+Passing `--custom-rules` skips this YAML stage and generic profiling entirely. See [Custom natural-language rules](#custom-natural-language-rules).
+
+### 4. Custom natural-language rules (optional)
+
+When `--custom-rules` is passed, `CustomRuleRunner` loads the CSV, asks Ollama for a `SELECT`, qualifies table names with `{database}.{schema}`, rebuilds the SELECT list from the rule’s include-columns, validates the SQL, and executes it through the same `RuleEngine` as YAML rules. See [Custom natural-language rules](#custom-natural-language-rules).
+
+### 5. LLM enrichment (optional)
 
 If you do **not** pass `--skip-llm`, the pipeline:
 
@@ -139,9 +154,9 @@ If you do **not** pass `--skip-llm`, the pipeline:
    - `LLM_RECOMMENDED_FIX`
    - `LLM_GOVERNANCE_NOTE`
 
-Use `--skip-llm` to test Snowflake connectivity or to produce a faster, rules-only report.
+Use `--skip-llm` to skip table summaries and issue-group enrichment. Custom-rule SQL generation still calls Ollama when `--custom-rules` is set.
 
-### 5. Excel export
+### 6. Excel export
 
 A file is written to `output/dq_governance_report_YYYYMMDD_HHMMSS.xlsx` with sheets:
 
@@ -149,7 +164,7 @@ A file is written to `output/dq_governance_report_YYYYMMDD_HHMMSS.xlsx` with she
 |---|---|
 | **Overview** | Total issues, tables scanned, critical/high counts, generation timestamp |
 | **Rule_Summary** | Issue counts by type, rule name, and severity |
-| **Table_Profiles** | Row count, primary keys, and issue counts per table |
+| **Table_Profiles** | Row count, primary keys, and issue counts per table (empty in `--custom-rules` mode) |
 | **Row_Issues** | Every flagged row or table-level issue, plus LLM columns when enabled |
 | **LLM_Table_Summaries** | Narrative quality summary per table |
 
@@ -164,21 +179,26 @@ data_governance_pipeline/
 ├── main.py                 # Entry point
 ├── config/
 │   ├── config.yaml         # Thresholds, output, which rule categories to run
-│   └── rules.yaml          # Business rules (SQL)
+│   ├── rules.yaml          # Business rules (SQL)
+│   └── custom_rules.csv    # Natural-language rules for --custom-rules
 ├── src/
 │   ├── pipeline.py         # Orchestration
 │   ├── snowflake_client.py # Connection and metadata queries
 │   ├── profiler.py         # Null rates and duplicate PKs
 │   ├── rule_engine.py      # YAML SQL rules
+│   ├── custom_rules.py     # CSV → LLM SQL → Snowflake
 │   ├── llm_analyzer.py     # Ollama / Llama 3.2
 │   ├── excel_exporter.py   # Multi-sheet workbook
 │   ├── config_loader.py    # YAML + .env merge
-│   ├── cli.py              # --skip-llm, --log-level
+│   ├── cli.py              # --skip-llm, --custom-rules, --log-level
 │   └── logging_config.py
 ├── scripts/
 │   └── snowflake_synthetic_data/
 │       ├── DQ_TABLES_TEST_SCRIPT.sql     # Synthetic Snowflake test schema
-│       └── ADVISER_RULES_TEST_SCRIPT.sql # Extra IM/FP/RM test cases
+│       ├── ADVISER_RULES_TEST_SCRIPT.sql # Extra IM/FP/RM test cases
+│       └── CUSTOM_RULES_TEST_SCRIPT.sql  # Extra CLIENTS/ADVISERS rows for CSV rules
+├── output/                 # Timestamped Excel reports (created at runtime)
+├── logs/                   # Timestamped run logs (created at runtime)
 ├── .vscode/
 │   ├── launch.json         # Debug configs (with / without LLM)
 │   ├── settings.json       # Default conda interpreter and terminal activation
@@ -196,7 +216,7 @@ data_governance_pipeline/
 
 - Python 3.14 (see `environment.yml`) or a recent 3.x if you install from `requirements.txt`
 - Access to a Snowflake account, warehouse, database, and schema
-- [Ollama](https://ollama.com/) installed locally if you want LLM enrichment
+- [Ollama](https://ollama.com/) installed locally for LLM enrichment and for `--custom-rules` SQL generation
 - Conda (recommended) or pip
 
 ### 1. Clone and create the environment
@@ -248,7 +268,7 @@ Fill Snowflake and Ollama values. `CONDA_ENV_NAME` is used by Cursor/VS Code to 
 | `OLLAMA_MODEL` | Default `llama3.2` |
 | `OLLAMA_HOST` | Default `http://localhost:11434` |
 
-Pull the model once if you will use LLM analysis:
+Pull the model once if you will use LLM analysis or `--custom-rules`:
 
 ```bash
 ollama pull llama3.2
@@ -258,10 +278,11 @@ Confirm Ollama is running (typically `ollama serve` or the desktop app).
 
 ### 3. Optional: load the synthetic test schema
 
-To try the pipeline without production data, run in a Snowflake worksheet:
+To try the pipeline without production data, run in a Snowflake worksheet **in this order**:
 
-1. `scripts/snowflake_synthetic_data/DQ_TABLES_TEST_SCRIPT.sql` — creates `DQ_TEST_DB.DQ_TEST_SCHEMA` with sample `CLIENTS`, `ADVISERS`, and related tables seeded with known issues
-2. `scripts/snowflake_synthetic_data/ADVISER_RULES_TEST_SCRIPT.sql` — extra IM/FP/RM scenarios
+1. `scripts/snowflake_synthetic_data/DQ_TABLES_TEST_SCRIPT.sql` — creates `DQ_TEST_DB.DQ_TEST_SCHEMA` with sample `CLIENTS`, `ADVISERS`, and related tables seeded with known YAML / profiler issues
+2. `scripts/snowflake_synthetic_data/ADVISER_RULES_TEST_SCRIPT.sql` — optional; extra IM/FP/RM scenarios (updates existing seed rows)
+3. `scripts/snowflake_synthetic_data/CUSTOM_RULES_TEST_SCRIPT.sql` — optional; **adds** `ADV101` / `CR*` rows for `--custom-rules` without changing C001–C015
 
 Then set `.env` to:
 
@@ -297,6 +318,9 @@ Useful flags:
 python main.py --skip-llm
 python main.py --log-level DEBUG
 python main.py --skip-llm --log-level WARNING
+python main.py --custom-rules
+python main.py --custom-rules config/custom_rules.csv
+python main.py --custom-rules --skip-llm
 ```
 
 On success the console prints tables scanned, total issues, report path, and log path.
@@ -309,6 +333,7 @@ Use the launch configurations in `.vscode/launch.json`. They load `.env` and run
 |---|---|
 | **Run main.py (no LLM)** | `python main.py --skip-llm` — Snowflake scan and Excel report only |
 | **Run main.py (with LLM)** | `python main.py` — full run including Ollama |
+| **Run main.py (custom rules)** | `python main.py --custom-rules` — CSV natural-language rules only (Ollama required for SQL generation) |
 
 Select **Run main.py (no LLM)** and start debugging (F5). That is the faster path for connectivity and rule changes.
 
@@ -356,6 +381,77 @@ Requirements:
 
 After saving, re-run `python main.py`. New issues appear on **Row_Issues** and roll up on **Rule_Summary**.
 
+Do not put ad-hoc natural-language checks in `rules.yaml`. Use `--custom-rules` and `config/custom_rules.csv` instead.
+
+---
+
+## Custom natural-language rules
+
+`--custom-rules` is off by default. When you pass it, the pipeline **does not** run generic profiling (`duplicate_primary_key`, `high_null_rate`) or any SQL in `config/rules.yaml`. Only the CSV rules run. Results still go through the same Excel path (Row_Issues, Rule_Summary, optional `LLM_*` enrichment).
+
+```bash
+python main.py --custom-rules
+python main.py --custom-rules path/to/my_rules.csv
+python main.py --custom-rules --skip-llm   # still generates SQL with Ollama; skips issue enrichment
+```
+
+If you omit the path, the default file is `config/custom_rules.csv`.
+
+| Flags | Profiling + `rules.yaml` | CSV → SQL (Ollama) | Table summaries + `LLM_*` columns |
+|---|---|---|---|
+| none | yes | no | yes |
+| `--skip-llm` | yes | no | no |
+| `--custom-rules` | no | yes | yes |
+| `--custom-rules --skip-llm` | no | yes | no |
+
+### How SQL is generated
+
+For each enabled CSV row, `src/custom_rules.py`:
+
+1. Loads column metadata from Snowflake for `table` plus `related_tables`
+2. Builds a SELECT checklist from “include … in the result” (mapped onto real column names, e.g. “adviser name” → `ADVISER_NAME`) and a WHERE checklist from the wording (null / zero / negative / non-deleted / `COL = FALSE`)
+3. Asks Ollama for a single-line `SELECT` using **unqualified** table names (JSON mode cannot reliably emit `{database}` braces)
+4. Prefixes `FROM` / `JOIN` tables with `{database}.{schema}.`
+5. Rebuilds the SELECT list from the checklist plus `'<id>' AS ISSUE_TYPE` and `ISSUE_DETAIL`
+6. Validates safety (SELECT/WITH only) and checklist coverage; retries up to 3 times
+7. Executes through `RuleEngine` (same `RULE_ERROR` behaviour as YAML rules)
+
+Generated SQL is written to the run log under `logs/`.
+
+Do not put custom rules in `rules.yaml`. Promote a stable check into YAML only after you have reviewed the SQL.
+
+### CSV template
+
+| Column | Required | Purpose |
+|---|---|---|
+| `id` | yes | Becomes `ISSUE_TYPE` |
+| `name` | yes | Shown as `RULE_NAME` in the report |
+| `table` | yes | Primary table; must exist in the target schema |
+| `primary_key` | recommended | Comma-separated columns used for `ROW_IDENTIFIER` |
+| `severity` | no | `critical` / `high` / `medium` / `low` (default `medium`) |
+| `enabled` | no | `true` / `false` (default `true`) |
+| `related_tables` | no | Extra tables whose columns are given to the LLM (needed for joins) |
+| `rule_text` | yes | Natural-language instruction; quote the field if it contains commas |
+
+Shipped example (`config/custom_rules.csv`):
+
+```csv
+id,name,table,primary_key,severity,enabled,related_tables,rule_text
+inactive_im_assigned,Non-deleted clients assigned to an inactive IM,CLIENTS,CLIENT_ID,high,TRUE,ADVISERS,"Flag every non-deleted client whose IM_CODE matches an adviser with IS_ACTIVE = FALSE. Include CLIENT_ID, IM_CODE, adviser name, CLIENT_STATUS and IS_ACTIVE in the result."
+zero_or_negative_aum_active,Active clients with zero or negative AUM,CLIENTS,CLIENT_ID,medium,TRUE,,"Flag every client with CLIENT_STATUS is ACTIVE, IS_DELETED = FALSE, and AUM that is null, zero, or negative. Include CLIENT_ID, CLIENT_STATUS, and AUM."
+```
+
+After `CUSTOM_RULES_TEST_SCRIPT.sql`, those two rules should flag:
+
+| Rule | Expected `CLIENT_ID` |
+|---|---|
+| `inactive_im_assigned` | C014 (seed, inactive `IM003`), CR001 (new, inactive `IM101`) |
+| `zero_or_negative_aum_active` | CR011 (AUM 0), CR012 (negative AUM), CR013 (NULL AUM) |
+
+Controls that must not fire: CR003 (deleted), CR004 (active IM), CR014 (positive AUM), CR015 (archived), CR016 (suspended), CR017 (deleted).
+
+Write `rule_text` so every alternative you care about is explicit (for example “null, zero, or negative”). A comparison such as `AUM <= 0` does not match NULL; the generator is instructed to OR in `IS NULL` when the text mentions null.
+
 ---
 
 ## Reading the report
@@ -388,9 +484,13 @@ Severity guide:
 | `SNOWFLAKE_ACCOUNT and SNOWFLAKE_USER must be set` | Fill account and user in `.env` |
 | Snowflake auth / warehouse errors | Account identifier, password, role, and that the warehouse is running |
 | `Model 'llama3.2' not found in Ollama` | `ollama pull llama3.2` and confirm `OLLAMA_HOST` |
-| Rule appears as `RULE_ERROR` | SQL failed (wrong table/column names). Fix the rule; other rules still ran |
+| `--custom-rules` fails before Snowflake queries | Ollama must be running; SQL generation is not skipped by `--skip-llm` |
+| `Custom rules file not found` | Pass a real path or keep `config/custom_rules.csv` |
+| Custom rule appears as `RULE_ERROR` | Check the log for `candidate SQL` / `generated SQL`. Table/column names must exist; `related_tables` is required for joins |
+| Custom rule returns fewer rows than expected | Confirm `CUSTOM_RULES_TEST_SCRIPT.sql` has been applied; C001–C015 alone are not enough for `zero_or_negative_aum_active` |
+| Rule appears as `RULE_ERROR` | YAML SQL failed (wrong table/column names). Fix the rule; other rules still ran |
 | Empty report / no tables | Schema name, privileges on `INFORMATION_SCHEMA`, and `exclude_tables` |
-| Slow runs | Large tables: profiling issues one COUNT per column. Use `--skip-llm` or disable profiling while iterating on rules |
+| Slow runs | Large tables: profiling issues one COUNT per column. Use `--skip-llm` or disable profiling while iterating on YAML rules. `--custom-rules` is slower because each rule calls Ollama |
 | Debugger uses the wrong Python / `ModuleNotFoundError` | Select interpreter `data_gov_agent`, or confirm `.vscode/launch.json` `python` path |
 | `No module named 'debugpy'` | `pip install debugpy` in the conda env, or recreate with `environment.yml` |
 | `conda activate` fails in the terminal | Set `CONDA_ENV_NAME` in `.env` to an env from `conda env list`; start Cursor from an Anaconda Prompt if conda is not on PATH |

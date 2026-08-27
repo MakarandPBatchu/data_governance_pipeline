@@ -9,10 +9,6 @@ from src.cli import parse_args
 from src.logging_config import configure_logging
 from src.pipeline import DataGovernancePipeline
 
-# TO DO: 
-# 1. TEST FOR MORE NUMBER OF ROWS PER TABLES
-# 2. SEE WHAT MORE DYNAMIC RULES CAN BE ADDED
-# 4. HOW TO MAKE BUSINESS RULES MORE DYNAMIC AND EASY TO ADD/REMOVE/EDIT
 def main() -> int:
     """Run the data governance pipeline and print a summary.
 
@@ -24,7 +20,7 @@ def main() -> int:
 
     try:
         pipeline = DataGovernancePipeline()
-        result = pipeline.run(skip_llm=args.skip_llm)
+        result = pipeline.run(skip_llm=args.skip_llm, custom_rules_path=args.custom_rules)
         print("\nPipeline complete.")
         print(f"  Tables scanned : {result['tables_scanned']}")
         print(f"  Total issues   : {result['total_issues']}")

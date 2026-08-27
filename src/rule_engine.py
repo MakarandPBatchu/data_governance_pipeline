@@ -69,8 +69,8 @@ class RuleEngine:
         if not sql_template:
             return pd.DataFrame()
 
-        sql = sql_template.format(database=database, schema=schema)
         try:
+            sql = sql_template.replace("{database}", database).replace("{schema}", schema)
             df = self.client.query(sql)
         except Exception as exc:
             return pd.DataFrame(

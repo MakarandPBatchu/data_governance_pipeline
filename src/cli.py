@@ -6,12 +6,16 @@ import argparse
 from dataclasses import dataclass
 
 
+DEFAULT_CUSTOM_RULES_PATH = "config/custom_rules.csv"
+
+
 @dataclass
 class CliArgs:
     """Parsed command-line options for main.py."""
 
     skip_llm: bool
     log_level: str
+    custom_rules: str | None
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -22,7 +26,19 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--skip-llm",
         action="store_true",
-        help="Skip Llama 3.2 analysis (useful for testing Snowflake connectivity only).",
+        help="Skip Llama 3.2 issue enrichment (SQL generation for --custom-rules still runs).",
+    )
+    parser.add_argument(
+        "--custom-rules",
+        nargs="?",
+        const=DEFAULT_CUSTOM_RULES_PATH,
+        default=None,
+        metavar="PATH",
+        help=(
+            "Run only natural-language custom rules from a CSV template. "
+            "Skips profiling and rules.yaml. If PATH is omitted, uses "
+            f"{DEFAULT_CUSTOM_RULES_PATH}."
+        ),
     )
     parser.add_argument(
         "--log-level",
@@ -40,7 +56,11 @@ def parse_args(argv: list[str] | None = None) -> CliArgs:
         argv: Optional argument list (defaults to ``sys.argv`` when ``None``).
 
     Returns:
-        Parsed ``CliArgs`` with ``skip_llm`` and ``log_level`` fields.
+        Parsed ``CliArgs`` with ``skip_llm``, ``custom_rules``, and ``log_level`` fields.
     """
     args = build_parser().parse_args(argv)
-    return CliArgs(skip_llm=args.skip_llm, log_level=args.log_level)
+    return CliArgs(
+        skip_llm=args.skip_llm,
+        log_level=args.log_level,
+        custom_rules=args.custom_rules,
+    )
