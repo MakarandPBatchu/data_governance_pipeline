@@ -21,6 +21,17 @@
             "cwd": "${workspaceFolder}",
             "python": "${userHome}/anaconda3/envs/data_gov_agent/python.exe",
             "envFile": "${workspaceFolder}/.env"
+        },
+        {
+            "name": "Run main.py (custom rules)",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/main.py",
+            "console": "integratedTerminal",
+            "cwd": "${workspaceFolder}",
+            "python": "${userHome}/anaconda3/envs/data_gov_agent/python.exe",
+            "envFile": "${workspaceFolder}/.env",
+            "args": ["--custom-rules"]
         }
     ]
 }

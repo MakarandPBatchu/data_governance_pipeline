@@ -1,0 +1,3 @@
+id,name,table,primary_key,severity,enabled,related_tables,rule_text
+inactive_im_assigned,Non-deleted clients assigned to an inactive IM,CLIENTS,CLIENT_ID,high,TRUE,ADVISERS,"Flag every non-deleted client whose IM_CODE matches an adviser with IS_ACTIVE = FALSE. Include CLIENT_ID, IM_CODE, adviser name, CLIENT_STATUS and IS_ACTIVE in the result."
+zero_or_negative_aum_active,Active clients with zero or negative AUM,CLIENTS,CLIENT_ID,medium,TRUE,,"Flag every client with CLIENT_STATUS is ACTIVE, IS_DELETED = FALSE, and AUM that is null, zero, or negative. Include CLIENT_ID, CLIENT_STATUS, and AUM."
