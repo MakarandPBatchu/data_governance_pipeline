@@ -30,7 +30,7 @@ Data never leaves your environment for LLM analysis: Ollama runs locally. Snowfl
 | Generic quality checks | Flags columns above a null-rate threshold and duplicate primary-key groups |
 | Business rule checks | Runs SQL rules (for example: archived clients with AUM, invalid IM/FP/RM) |
 | Custom natural-language rules | `--custom-rules` turns CSV free text into Snowflake SQL via Ollama (skips YAML + profiling) |
-| Local LLM enrichment | Adds summary, business impact, recommended fix, and governance notes per issue group |
+| Local LLM enrichment | Adds a one-sentence `LLM_SUMMARY` per issue group |
 | Excel governance pack | Overview metrics, rule counts, table profiles, row-level issues, and table-level LLM summaries |
 | Configurable scope | Toggle profiling vs business rules, exclude tables, override primary keys, tune thresholds |
 
@@ -42,7 +42,7 @@ Data never leaves your environment for LLM analysis: Ollama runs locally. Snowfl
 
 **Give data owners a single source of truth.** The Excel report consolidates technical issues (nulls, duplicate keys) and policy issues (adviser assignment, status vs AUM) into one artifact. Stewards can prioritize by severity instead of piecing together ad-hoc queries.
 
-**Shorten time from finding to fix.** LLM columns explain *why* an issue matters and *what to do*, so analysts and operations teams spend less time translating SQL results into action.
+**Shorten time from finding to fix.** LLM summaries describe each issue in plain language, so analysts and operations teams spend less time translating SQL results into action.
 
 **Keep sensitive data in-house.** Client identifiers and sample rows are analyzed with a local model. There is no cloud LLM API and no need to send production data to a third party.
 
@@ -148,11 +148,7 @@ If you do **not** pass `--skip-llm`, the pipeline:
 
 1. Verifies Ollama is running and the configured model is available
 2. Writes a 2–3 sentence quality summary per table that had profiling issues
-3. Groups all issues by type / rule / table and asks the model for:
-   - `LLM_SUMMARY`
-   - `LLM_BUSINESS_IMPACT`
-   - `LLM_RECOMMENDED_FIX`
-   - `LLM_GOVERNANCE_NOTE`
+3. Groups all issues by type / rule / table and asks the model for `LLM_SUMMARY`
 
 Use `--skip-llm` to skip table summaries and issue-group enrichment. Custom-rule SQL generation still calls Ollama when `--custom-rules` is set.
 
@@ -387,7 +383,7 @@ Do not put ad-hoc natural-language checks in `rules.yaml`. Use `--custom-rules` 
 
 ## Custom natural-language rules
 
-`--custom-rules` is off by default. When you pass it, the pipeline **does not** run generic profiling (`duplicate_primary_key`, `high_null_rate`) or any SQL in `config/rules.yaml`. Only the CSV rules run. Results still go through the same Excel path (Row_Issues, Rule_Summary, optional `LLM_*` enrichment).
+`--custom-rules` is off by default. When you pass it, the pipeline **does not** run generic profiling (`duplicate_primary_key`, `high_null_rate`) or any SQL in `config/rules.yaml`. Only the CSV rules run. Results still go through the same Excel path (Row_Issues, Rule_Summary, optional `LLM_SUMMARY` enrichment).
 
 ```bash
 python main.py --custom-rules
@@ -397,7 +393,7 @@ python main.py --custom-rules --skip-llm   # still generates SQL with Ollama; sk
 
 If you omit the path, the default file is `config/custom_rules.csv`.
 
-| Flags | Profiling + `rules.yaml` | CSV → SQL (Ollama) | Table summaries + `LLM_*` columns |
+| Flags | Profiling + `rules.yaml` | CSV → SQL (Ollama) | Table summaries + `LLM_SUMMARY` |
 |---|---|---|---|
 | none | yes | no | yes |
 | `--skip-llm` | yes | no | no |
@@ -456,7 +452,7 @@ Write `rule_text` so every alternative you care about is explicit (for example �
 
 ## Reading the report
 
-Start with **Overview** for volume and severity, then **Rule_Summary** to see which rules fire most. Open **Row_Issues** to remediate specific keys. Use **LLM_Table_Summaries** and the `LLM_*` columns when you need a narrative for a governance pack or ticket.
+Start with **Overview** for volume and severity, then **Rule_Summary** to see which rules fire most. Open **Row_Issues** to remediate specific keys. Use **LLM_Table_Summaries** and the `LLM_SUMMARY` column when you need a narrative for a governance pack or ticket.
 
 Severity guide:
 

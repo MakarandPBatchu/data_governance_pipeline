@@ -95,7 +95,7 @@ class LlamaAnalyzer:
             table_name: Snowflake table where the issue was found.
 
         Returns:
-            Dict with keys: summary, business_impact, recommended_fix, governance_note.
+            Dict with key ``llm_summary``.
         """
         sample_json = rows.head(self.sample_size).to_dict(orient="records")
         prompt = f"""You are a data governance analyst for a financial services firm.
@@ -109,12 +109,9 @@ Sample affected rows (JSON):
 {json.dumps(sample_json, indent=2, default=str)}
 
 Respond with a single JSON object only. No markdown, no code fences, no text before or after.
-Use exactly these keys:
+Use exactly this key:
 {{
-  "llm_summary": "One sentence describing the issue",
-  "business_impact": "What business risk this creates",
-  "recommended_fix": "Concrete steps to remediate",
-  "governance_note": "Any compliance or governance consideration"
+  "llm_summary": "One sentence describing the issue"
 }}"""
 
         raw = self._chat(prompt)
@@ -299,7 +296,7 @@ Respond with a JSON object whose sql value is a single-line string:
         return text
 
     def enrich_issues(self, issues_df: pd.DataFrame) -> pd.DataFrame:
-        """Add LLM narrative columns to every issue group in the DataFrame.
+        """Add an LLM summary column to every issue group in the DataFrame.
 
         Groups issues by ISSUE_TYPE, RULE_NAME, and TABLE_NAME, then calls
         ``analyze_issue_group`` once per group and applies the result to all
@@ -309,18 +306,14 @@ Respond with a JSON object whose sql value is a single-line string:
             issues_df: Combined issue DataFrame from profiling and business rules.
 
         Returns:
-            Copy of ``issues_df`` with LLM_SUMMARY, LLM_BUSINESS_IMPACT,
-            LLM_RECOMMENDED_FIX, and LLM_GOVERNANCE_NOTE columns added.
+            Copy of ``issues_df`` with an ``LLM_SUMMARY`` column added.
         """
         if issues_df.empty:
             return issues_df
 
         enriched = issues_df.copy()
         enriched["LLM_SUMMARY"] = ""
-        enriched["LLM_BUSINESS_IMPACT"] = ""
-        enriched["LLM_RECOMMENDED_FIX"] = ""
-        enriched["LLM_GOVERNANCE_NOTE"] = ""
-        avg_time_per_issue_group: list[float] = []   
+        avg_time_per_issue_group: list[float] = []
 
         group_cols = ["ISSUE_TYPE", "RULE_NAME", "TABLE_NAME"]
         existing = [c for c in group_cols if c in enriched.columns]
@@ -351,9 +344,6 @@ Respond with a JSON object whose sql value is a single-line string:
                 mask = mask & (enriched[col] == val)
 
             enriched.loc[mask, "LLM_SUMMARY"] = analysis.get("llm_summary", "")
-            enriched.loc[mask, "LLM_BUSINESS_IMPACT"] = analysis.get("business_impact", "")
-            enriched.loc[mask, "LLM_RECOMMENDED_FIX"] = analysis.get("recommended_fix", "")
-            enriched.loc[mask, "LLM_GOVERNANCE_NOTE"] = analysis.get("governance_note", "")
 
         if avg_time_per_issue_group:
             logger.info(f"Average time taken by LLM per issue group: {sum(avg_time_per_issue_group) / len(avg_time_per_issue_group)} seconds")
@@ -382,11 +372,11 @@ Respond with a JSON object whose sql value is a single-line string:
 
         Args:
             raw: Raw text returned by the LLM.
-            issue_type: Issue type (used in fallback governance note).
-            rule_name: Rule name (used in fallback governance note).
+            issue_type: Issue type (used in the parse-failure warning).
+            rule_name: Rule name (used in the parse-failure warning).
 
         Returns:
-            Dict with llm_summary, business_impact, recommended_fix, governance_note keys.
+            Dict with an ``llm_summary`` key.
         """
         text = self._extract_json_text(raw)
 
@@ -397,9 +387,6 @@ Respond with a JSON object whose sql value is a single-line string:
 
             return {
                 "llm_summary": str(parsed.get("llm_summary", "")),
-                "business_impact": str(parsed.get("business_impact", "")),
-                "recommended_fix": str(parsed.get("recommended_fix", "")),
-                "governance_note": str(parsed.get("governance_note", "")),
             }
         except (json.JSONDecodeError, TypeError, ValueError) as exc:
             logger.warning(
@@ -411,7 +398,4 @@ Respond with a JSON object whose sql value is a single-line string:
             )
             return {
                 "llm_summary": raw[:500],
-                "business_impact": "",
-                "recommended_fix": "Review issue manually; LLM response was not structured JSON.",
-                "governance_note": f"Issue: {issue_type} / {rule_name}",
             }
