@@ -14,6 +14,40 @@ from tenacity import retry, stop_after_attempt, wait_exponential
 
 logger = logging.getLogger(__name__)
 
+_META_SKIP_COLUMNS = frozenset({"DATABASE", "SCHEMA", "LLM_SUMMARY"})
+_FACT_COLUMN_ORDER = (
+    "TABLE_NAME",
+    "ISSUE_TYPE",
+    "RULE_NAME",
+    "SEVERITY",
+    "ROW_IDENTIFIER",
+    "PRIMARY_KEY",
+    "ISSUE_DETAIL",
+    "COLUMN_NAME",
+    "NULL_RATE",
+)
+_FACT_LABELS = {
+    "TABLE_NAME": "Table",
+    "ISSUE_TYPE": "Issue type",
+    "RULE_NAME": "Issue name",
+    "SEVERITY": "Severity",
+    "ROW_IDENTIFIER": "Affected record",
+    "PRIMARY_KEY": "Primary key",
+    "ISSUE_DETAIL": "Finding",
+    "COLUMN_NAME": "Column",
+    "NULL_RATE": "Null rate",
+}
+_NUMBER_RE = re.compile(r"\d+(?:[.,]\d+)?")
+_CODE_RE = re.compile(r"\b[A-Z]{1,8}\d+\b", re.IGNORECASE)
+_ISSUE_AS_ID_RE = re.compile(
+    r"\bissue\s*(?:\(|:|-)?\s*[A-Z]{1,8}\d+\b",
+    re.IGNORECASE,
+)
+_CURRENCY_RE = re.compile(
+    r"(?i)[$£€¥₹₩₽₪₫₱₡₦₴₵₸₺₼₾฿元円]|\b(?:USD|GBP|EUR|JPY|INR|AUD|CAD|CHF|CNY)\b"
+)
+
+
 class LlamaAnalyzer:
     """Use a local Ollama model to generate custom-rule SQL and enrich findings."""
 
@@ -28,7 +62,6 @@ class LlamaAnalyzer:
         self.host = llm_cfg["host"]
         self.temperature = llm_cfg.get("temperature", 0.1)
         self.max_tokens = llm_cfg.get("max_tokens", 1024)
-        self.sample_size = settings.get("profiling", {}).get("sample_size_for_llm", 5)
         self._client = ollama.Client(host=self.host)
 
     def verify_connection(self) -> None:
@@ -49,7 +82,7 @@ class LlamaAnalyzer:
     def _chat(
         self,
         prompt: str,
-        _max_tokens: int | None = 1024,
+        max_tokens: int | None = None,
         *,
         json_mode: bool = False,
     ) -> str:
@@ -59,7 +92,7 @@ class LlamaAnalyzer:
 
         Args:
             prompt: User message content.
-            _max_tokens: Maximum number of tokens to generate.
+            max_tokens: Override for tokens to generate; defaults to settings.
             json_mode: When True, ask Ollama to emit a JSON object.
         Returns:
             Stripped text content from the model response.
@@ -69,56 +102,13 @@ class LlamaAnalyzer:
             "messages": [{"role": "user", "content": prompt}],
             "options": {
                 "temperature": self.temperature,
-                "num_predict": max(self.max_tokens, _max_tokens),
+                "num_predict": max_tokens if max_tokens is not None else self.max_tokens,
             },
         }
         if json_mode:
             kwargs["format"] = "json"
         response = self._client.chat(**kwargs)
         return response.message.content.strip()
-
-    def analyze_issue_group(
-        self,
-        issue_type: str,
-        rule_name: str,
-        severity: str,
-        rows: pd.DataFrame,
-        table_name: str,
-    ) -> dict[str, str]:
-        """Ask the LLM to analyse one group of related issues.
-
-        Args:
-            issue_type: Issue category identifier (e.g. ``archived_client_with_aum``).
-            rule_name: Human-readable rule name for the prompt.
-            severity: Issue severity level (critical, high, medium, low).
-            rows: Sample of affected rows per issue type group
-            table_name: Snowflake table where the issue was found.
-
-        Returns:
-            Dict with keys: summary, business_impact, recommended_fix, governance_note.
-        """
-        sample_json = rows.head(self.sample_size).to_dict(orient="records")
-        prompt = f"""You are a data governance analyst for a financial services firm.
-Analyze the following data quality issue found in Snowflake.
-
-Table: {table_name}
-Issue type: {issue_type}
-Rule: {rule_name}
-Severity: {severity}
-Sample affected rows (JSON):
-{json.dumps(sample_json, indent=2, default=str)}
-
-Respond with a single JSON object only. No markdown, no code fences, no text before or after.
-Use exactly these keys:
-{{
-  "llm_summary": "One sentence describing the issue",
-  "business_impact": "What business risk this creates",
-  "recommended_fix": "Concrete steps to remediate",
-  "governance_note": "Any compliance or governance consideration"
-}}"""
-
-        raw = self._chat(prompt)
-        return self._parse_llm_json(raw, issue_type, rule_name)
 
     def analyze_table_profile(
         self,
@@ -241,18 +231,17 @@ Hard requirements:
 Respond with a JSON object whose sql value is a single-line string:
 {{"sql": "SELECT ... FROM CLIENTS c WHERE ..."}}"""
 
-        raw = self._chat(prompt, _max_tokens=2048, json_mode=True)
+        raw = self._chat(prompt, max_tokens=2048, json_mode=True)
         return self._parse_sql_response(raw)
 
     def _parse_sql_response(self, raw: str) -> str:
         """Extract a SQL string from JSON or a fenced SQL block."""
-        for candidate in (raw.strip(),):
-            try:
-                parsed = json.loads(candidate)
-                if isinstance(parsed, dict) and parsed.get("sql"):
-                    return self._clean_generated_sql(str(parsed["sql"]))
-            except (json.JSONDecodeError, TypeError, ValueError):
-                pass
+        try:
+            parsed = json.loads(raw.strip())
+            if isinstance(parsed, dict) and parsed.get("sql"):
+                return self._clean_generated_sql(str(parsed["sql"]))
+        except (json.JSONDecodeError, TypeError, ValueError):
+            pass
 
         extracted = self._extract_sql_field(raw)
         if extracted:
@@ -299,119 +288,201 @@ Respond with a JSON object whose sql value is a single-line string:
         return text
 
     def enrich_issues(self, issues_df: pd.DataFrame) -> pd.DataFrame:
-        """Add LLM narrative columns to every issue group in the DataFrame.
+        """Add a grounded one-sentence LLM summary for each issue row.
 
-        Groups issues by ISSUE_TYPE, RULE_NAME, and TABLE_NAME, then calls
-        ``analyze_issue_group`` once per group and applies the result to all
-        rows in that group.
+        Each row is summarized from only that row's fields. Summaries that
+        introduce identifiers or numbers not present in the row are discarded.
 
         Args:
             issues_df: Combined issue DataFrame from profiling and business rules.
 
         Returns:
-            Copy of ``issues_df`` with LLM_SUMMARY, LLM_BUSINESS_IMPACT,
-            LLM_RECOMMENDED_FIX, and LLM_GOVERNANCE_NOTE columns added.
+            Copy of ``issues_df`` with an ``LLM_SUMMARY`` column added.
         """
         if issues_df.empty:
             return issues_df
 
         enriched = issues_df.copy()
         enriched["LLM_SUMMARY"] = ""
-        enriched["LLM_BUSINESS_IMPACT"] = ""
-        enriched["LLM_RECOMMENDED_FIX"] = ""
-        enriched["LLM_GOVERNANCE_NOTE"] = ""
-        avg_time_per_issue_group: list[float] = []   
+        elapsed: list[float] = []
 
-        group_cols = ["ISSUE_TYPE", "RULE_NAME", "TABLE_NAME"]
-        existing = [c for c in group_cols if c in enriched.columns]
-
-        
-        for keys, group in enriched.groupby(existing, dropna=False):
-            
-            if isinstance(keys, tuple):
-                issue_type, rule_name, table_name = keys
-            else:
-                issue_type, rule_name, table_name = keys, "", ""
-
-            logger.info(f"Analyzing issue group - {keys}")
-
+        for idx, row in enriched.iterrows():
+            ident = row.get("ROW_IDENTIFIER") or row.get("CLIENT_ID") or idx
+            logger.info("Summarizing issue row %s (%s)", ident, row.get("ISSUE_TYPE", ""))
             start_time = time.time()
-            analysis = self.analyze_issue_group(
-                issue_type=str(issue_type),
-                rule_name=str(rule_name or issue_type),
-                severity=str(group["SEVERITY"].iloc[0]) if "SEVERITY" in group.columns else "medium",
-                rows=group,
-                table_name=str(table_name),
+            enriched.at[idx, "LLM_SUMMARY"] = self._summarize_issue_row(row)
+            elapsed.append(time.time() - start_time)
+
+        if elapsed:
+            logger.info(
+                "Average time taken by LLM per issue row: %.2f seconds",
+                sum(elapsed) / len(elapsed),
             )
-            end_time = time.time()
-            avg_time_per_issue_group.append(end_time - start_time)
-
-            mask = True
-            for col, val in zip(existing, keys if isinstance(keys, tuple) else (keys,)):
-                mask = mask & (enriched[col] == val)
-
-            enriched.loc[mask, "LLM_SUMMARY"] = analysis.get("llm_summary", "")
-            enriched.loc[mask, "LLM_BUSINESS_IMPACT"] = analysis.get("business_impact", "")
-            enriched.loc[mask, "LLM_RECOMMENDED_FIX"] = analysis.get("recommended_fix", "")
-            enriched.loc[mask, "LLM_GOVERNANCE_NOTE"] = analysis.get("governance_note", "")
-
-        if avg_time_per_issue_group:
-            logger.info(f"Average time taken by LLM per issue group: {sum(avg_time_per_issue_group) / len(avg_time_per_issue_group)} seconds")
         return enriched
 
-    def _extract_json_text(self, raw: str) -> str:
-        """Pull a JSON object string out of a free-form LLM response."""
+    def _summarize_issue_row(self, row: pd.Series) -> str:
+        """Paraphrase one issue row; fall back to the row's own detail if ungrounded."""
+        facts = self._issue_row_facts(row)
+        fallback = self._fallback_row_summary(row)
+        if not facts:
+            return fallback
+
+        prompt = f"""You are a data governance analyst.
+Rewrite the finding below as one sentence for a governance report.
+
+Use ONLY these facts. Copy identifiers, amounts, dates, codes, and rates exactly.
+"Issue name" / "Issue type" is the name of the problem. The "Affected record" value
+is the row that failed (a client id, portfolio id, etc.). Never treat that value as
+the issue name. Do not write "the issue C003" or "issue (C003)".
+Use the Affected record as the subject, for example "Record PF_DUP1 has ..." or
+"Client C002 has ...". Mention a client id only if it is this row's Affected record.
+"Finding" is the source of truth for what is wrong on this row.
+Do not invent, round, convert, or guess any value that is not listed.
+Do not mention any other client, table, column, or statistic.
+Do not say a field is missing or invalid unless the Finding says so.
+Do not add business impact, recommendations, timestamps, or placeholders such as [DATE].
+Write amounts such as AUM as plain numbers only. Do not add currency symbols
+($, £, €) or currency codes (USD, GBP).
+
+Facts:
+{facts}
+
+Respond with a single JSON object only:
+{{"llm_summary": "one sentence"}}"""
+
+        raw = self._chat(prompt, max_tokens=256, json_mode=True)
+        summary = self._strip_currency(self._parse_single_summary(raw))
+        if not summary or not self._summary_is_grounded(summary, facts):
+            logger.warning(
+                "Discarding ungrounded LLM_SUMMARY for %s / %s. Preview: %.200s",
+                row.get("ISSUE_TYPE", ""),
+                row.get("ROW_IDENTIFIER", ""),
+                summary or raw,
+            )
+            return fallback
+        return summary
+
+    def _issue_row_facts(self, row: pd.Series) -> str:
+        """Build a fact list from this row's issue fields only.
+
+        Extra result columns (other codes, amounts, etc.) are omitted so the
+        model cannot treat them as additional violations.
+        """
+        lines: list[str] = []
+        seen: set[str] = set()
+
+        def add(col: str, val: Any) -> None:
+            if col in seen or col in _META_SKIP_COLUMNS or pd.isna(val):
+                return
+            if isinstance(val, str) and not val.strip():
+                return
+            seen.add(col)
+            label = _FACT_LABELS.get(col, col)
+            lines.append(f"- {label}: {self._format_fact_value(col, val)}")
+
+        for col in _FACT_COLUMN_ORDER:
+            if col in row.index:
+                add(col, row[col])
+        return "\n".join(lines)
+
+    @staticmethod
+    def _format_fact_value(col: str, val: Any) -> str:
+        """Render a row value so the model can copy it without converting."""
+        if isinstance(val, pd.Timestamp):
+            return str(val)
+        if hasattr(val, "item"):
+            try:
+                val = val.item()
+            except (ValueError, AttributeError):
+                return str(val)
+        if col == "NULL_RATE":
+            try:
+                rate = float(val)
+            except (TypeError, ValueError):
+                return str(val)
+            pct = rate * 100.0 if rate <= 1.0 else rate
+            return f"{rate} ({pct:.1f}%)"
+        return str(val)
+
+    @staticmethod
+    def _fallback_row_summary(row: pd.Series) -> str:
+        """Grounded sentence built only from identifier and ISSUE_DETAIL."""
+        ident = str(row.get("ROW_IDENTIFIER") or row.get("CLIENT_ID") or "").strip()
+        detail = str(row.get("ISSUE_DETAIL") or "").strip()
+        if ident and ident != "TABLE_LEVEL" and detail:
+            return LlamaAnalyzer._strip_currency(f"{ident}: {detail}")
+        if detail:
+            return LlamaAnalyzer._strip_currency(detail)
+        if ident and ident != "TABLE_LEVEL":
+            return f"{ident} flagged for {row.get('ISSUE_TYPE') or 'data quality issue'}"
+        return str(row.get("ISSUE_TYPE") or "Data quality issue")
+
+    def _parse_single_summary(self, raw: str) -> str:
+        """Extract ``llm_summary`` from a JSON object, or empty string on failure."""
         text = raw.strip()
-
-        fence_match = re.search(r"```(?:json)?\s*([\s\S]*?)\s*```", text, re.IGNORECASE)
-        if fence_match:
-            text = fence_match.group(1).strip()
-
+        fence = re.search(r"```(?:json)?\s*([\s\S]*?)\s*```", text, re.IGNORECASE)
+        if fence:
+            text = fence.group(1).strip()
         start = text.find("{")
         end = text.rfind("}")
         if start != -1 and end != -1 and end > start:
             text = text[start : end + 1]
-
-        return text.strip()
-
-    def _parse_llm_json(self, raw: str, issue_type: str, rule_name: str) -> dict[str, str]:
-        """Parse the LLM's JSON response, falling back gracefully on malformed output.
-
-        Handles markdown fences, leading/trailing prose, and minor formatting issues
-        common in local model output.
-
-        Args:
-            raw: Raw text returned by the LLM.
-            issue_type: Issue type (used in fallback governance note).
-            rule_name: Rule name (used in fallback governance note).
-
-        Returns:
-            Dict with llm_summary, business_impact, recommended_fix, governance_note keys.
-        """
-        text = self._extract_json_text(raw)
-
         try:
             parsed = json.loads(text)
-            if not isinstance(parsed, dict):
-                raise json.JSONDecodeError("Expected JSON object", text, 0)
+        except (json.JSONDecodeError, TypeError, ValueError):
+            return ""
+        if not isinstance(parsed, dict):
+            return ""
+        return str(parsed.get("llm_summary") or "").strip()
 
-            return {
-                "llm_summary": str(parsed.get("llm_summary", "")),
-                "business_impact": str(parsed.get("business_impact", "")),
-                "recommended_fix": str(parsed.get("recommended_fix", "")),
-                "governance_note": str(parsed.get("governance_note", "")),
-            }
-        except (json.JSONDecodeError, TypeError, ValueError) as exc:
-            logger.warning(
-                "LLM returned non-JSON response for %s / %s: %s. Raw preview: %.200s",
-                issue_type,
-                rule_name,
-                exc,
-                raw,
-            )
-            return {
-                "llm_summary": raw[:500],
-                "business_impact": "",
-                "recommended_fix": "Review issue manually; LLM response was not structured JSON.",
-                "governance_note": f"Issue: {issue_type} / {rule_name}",
-            }
+    @staticmethod
+    def _strip_currency(text: str) -> str:
+        """Remove currency symbols and common currency codes from a summary."""
+        if not text:
+            return text
+        cleaned = _CURRENCY_RE.sub("", text)
+        return re.sub(r"\s{2,}", " ", cleaned).strip()
+
+    def _summary_is_grounded(self, summary: str, facts: str) -> bool:
+        """Return True when every code and number in the summary appears in the facts."""
+        if re.search(r"\[[A-Z][A-Z0-9_]*\]", summary):
+            return False
+        if _ISSUE_AS_ID_RE.search(summary):
+            return False
+        if _CURRENCY_RE.search(summary):
+            return False
+
+        fact_upper = facts.upper()
+        for code in _CODE_RE.findall(summary):
+            if code.upper() not in fact_upper:
+                return False
+
+        fact_numbers = self._extract_numbers(facts)
+        for number in self._extract_numbers(summary):
+            if not self._number_in_facts(number, fact_numbers):
+                return False
+        return True
+
+    @staticmethod
+    def _extract_numbers(text: str) -> list[float]:
+        """Pull numeric literals out of text, ignoring identifier codes such as C002."""
+        masked = _CODE_RE.sub(" ", text)
+        values: list[float] = []
+        for match in _NUMBER_RE.findall(masked.replace(",", "")):
+            try:
+                values.append(float(match))
+            except ValueError:
+                continue
+        return values
+
+    @staticmethod
+    def _number_in_facts(number: float, fact_numbers: list[float]) -> bool:
+        """Allow an exact fact number, or a percent form of a 0–1 null rate."""
+        for fact in fact_numbers:
+            if abs(number - fact) <= 1e-6 * max(1.0, abs(fact)):
+                return True
+            if 0 < fact <= 1 and abs(number - fact * 100) <= 0.05:
+                return True
+            if 0 < number <= 1 and abs(fact - number * 100) <= 0.05:
+                return True
+        return False

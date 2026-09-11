@@ -13,6 +13,17 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 CONFIG_DIR = PROJECT_ROOT / "config"
 
 
+def _resolve_optional_path(raw: str) -> str:
+    """Return an absolute path for a project-relative file, or empty if unset."""
+    value = (raw or "").strip()
+    if not value:
+        return ""
+    path = Path(value).expanduser()
+    if not path.is_absolute():
+        path = PROJECT_ROOT / path
+    return str(path)
+
+
 def load_yaml(path: Path) -> dict[str, Any]:
     """Load a YAML file and return its contents as a dictionary.
 
@@ -52,6 +63,7 @@ def load_settings() -> dict[str, Any]:
             "database": os.getenv("SNOWFLAKE_DATABASE") ,
             "schema": os.getenv("SNOWFLAKE_SCHEMA") ,
             "role": os.getenv("SNOWFLAKE_ROLE"),
+            "private_key_path": _resolve_optional_path(os.getenv("SNOWFLAKE_PRIVATE_KEY_PATH", "")),
         },
         "profiling": config.get("profiling", {}),
         "output": config.get("output", {}),

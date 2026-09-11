@@ -13,7 +13,6 @@ profiling:
   null_rate_threshold: 0.05        # Flag columns with >5% nulls
   duplicate_pk_threshold: 0        # Any duplicate PK is flagged
   stale_days_threshold: 90         # Flag if max(updated_at) older than N days
-  sample_size_for_llm: 5           # Sample rows sent to LLM per issue type
 
 # Pipeline output
 output:

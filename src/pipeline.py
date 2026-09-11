@@ -19,6 +19,11 @@ from src.snowflake_client import SnowflakeClient
 
 logger = logging.getLogger(__name__)
 
+_TABLE_LEVEL = "TABLE_LEVEL"
+_CLEAN_TABLE_SUMMARY = (
+    "No issues were identified in this table as per the given rules."
+)
+
 
 class DataGovernancePipeline:
     """End-to-end pipeline: scan Snowflake, detect issues, enrich with LLM, export Excel."""
@@ -127,19 +132,33 @@ class DataGovernancePipeline:
             ignore_index=True,
         )
 
-        if not skip_llm and not all_issues.empty:
+        row_issues = self._without_table_level(all_issues)
+        table_level_issue_count = (
+            len(all_issues) - len(row_issues) if not all_issues.empty else 0
+        )
+
+        if not skip_llm and not row_issues.empty:
             logger.info("Enriching issues with Llama 3.2 analysis...")
-            all_issues = self.llm.enrich_issues(all_issues)
+            row_issues = self.llm.enrich_issues(row_issues)
+
+        if not skip_llm:
+            summary_tables = (
+                self.custom_rules.targeted_table_names if custom_rules_path else tables
+            )
+            llm_table_summaries = self._add_clean_table_summaries(
+                llm_table_summaries, summary_tables, all_issues
+            )
 
         rule_summary = self.rule_engine.summarize_by_rule(all_issues)
         table_profiles_df = pd.DataFrame(profile_rows)
         llm_summaries_df = pd.DataFrame(llm_table_summaries)
 
         output_path = self.exporter.export(
-            row_issues=all_issues,
+            row_issues=row_issues,
             rule_summary=rule_summary,
             table_profiles=table_profiles_df,
             llm_table_summaries=llm_summaries_df,
+            table_level_issue_count=table_level_issue_count,
         )
 
         logger.info("Report written to %s", output_path)
@@ -148,7 +167,8 @@ class DataGovernancePipeline:
         return {
             "output_path": str(output_path),
             "tables_scanned": tables_scanned,
-            "total_issues": len(all_issues),
+            "total_row_issues": len(row_issues),
+            "total_table_issues": table_level_issue_count,
             "rule_summary": rule_summary,
         }
 
@@ -215,3 +235,34 @@ class DataGovernancePipeline:
             )
 
         return profile_issues, profile_rows, llm_table_summaries
+
+    @staticmethod
+    def _without_table_level(issues_df: pd.DataFrame) -> pd.DataFrame:
+        """Drop table-level profile findings so Row_Issues stays row-specific."""
+        if issues_df.empty or "ROW_IDENTIFIER" not in issues_df.columns:
+            return issues_df
+        mask = issues_df["ROW_IDENTIFIER"].astype(str).str.upper() != _TABLE_LEVEL
+        return issues_df.loc[mask].copy()
+
+    @staticmethod
+    def _add_clean_table_summaries(
+        llm_table_summaries: list[dict[str, str]],
+        tables: list[str],
+        all_issues: pd.DataFrame,
+    ) -> list[dict[str, str]]:
+        """Add a no-findings note for scanned tables that produced no issues."""
+        existing = {str(row["TABLE_NAME"]).upper() for row in llm_table_summaries}
+        tables_with_issues: set[str] = set()
+        if not all_issues.empty and "TABLE_NAME" in all_issues.columns:
+            tables_with_issues = {
+                str(name).upper() for name in all_issues["TABLE_NAME"].dropna()
+            }
+
+        summaries = list(llm_table_summaries)
+        for table in tables:
+            if table.upper() in existing or table.upper() in tables_with_issues:
+                continue
+            summaries.append(
+                {"TABLE_NAME": table, "LLM_SUMMARY": _CLEAN_TABLE_SUMMARY}
+            )
+        return summaries

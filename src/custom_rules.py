@@ -48,6 +48,7 @@ class CustomRuleRunner:
         self.rule_engine = rule_engine
         self.settings = settings
         self.tables_targeted = 0
+        self.targeted_table_names: list[str] = []
 
     def run(
         self,
@@ -73,7 +74,9 @@ class CustomRuleRunner:
         """
         csv_path = self._resolve_path(path)
         rows = self.load_csv(csv_path)
-        self.tables_targeted = len({r["table"].upper() for r in rows}) if rows else 0
+        targeted = [r["table"] for r in rows] if rows else []
+        self.targeted_table_names = list(dict.fromkeys(targeted))
+        self.tables_targeted = len(self.targeted_table_names)
 
         if not rows:
             logger.warning("No enabled custom rules found in %s", csv_path)

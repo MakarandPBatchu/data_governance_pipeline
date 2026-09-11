@@ -15,8 +15,8 @@ This pipeline exists to:
 - **Discover** data quality problems across a schema, not just one table at a time
 - **Enforce** business and governance rules as versioned SQL in `config/rules.yaml`
 - **Author ad-hoc checks** in natural language via `config/custom_rules.csv` (Ollama writes the SQL)
-- **Explain** findings in plain language so non-engineers can understand impact and next steps
-- **Deliver** a repeatable Excel report for stewards, operations, and audit
+- **Explain** each row-level finding in a short `LLM_SUMMARY` grounded in that row's fields
+- **Deliver** a repeatable, filterable Excel report for stewards, operations, and audit
 
 Data never leaves your environment for LLM analysis: Ollama runs locally. Snowflake credentials stay in a local `.env` file that is not committed to git.
 
@@ -30,9 +30,9 @@ Data never leaves your environment for LLM analysis: Ollama runs locally. Snowfl
 | Generic quality checks | Flags columns above a null-rate threshold and duplicate primary-key groups |
 | Business rule checks | Runs SQL rules (for example: archived clients with AUM, invalid IM/FP/RM) |
 | Custom natural-language rules | `--custom-rules` turns CSV free text into Snowflake SQL via Ollama (skips YAML + profiling) |
-| Local LLM enrichment | Adds summary, business impact, recommended fix, and governance notes per issue group |
-| Excel governance pack | Overview metrics, rule counts, table profiles, row-level issues, and table-level LLM summaries |
-| Configurable scope | Toggle profiling vs business rules, exclude tables, override primary keys, tune thresholds |
+| Local LLM enrichment | Adds a grounded one-sentence `LLM_SUMMARY` per Row_Issues record, plus a table narrative (or a no-findings note) |
+| Excel governance pack | Formatted Excel Tables: Overview (row- and table-level counts), rule counts, table profiles, row issues, table summaries |
+| Configurable scope | Toggle profiling vs business rules, exclude tables, and set the null-rate threshold |
 
 ---
 
@@ -42,9 +42,9 @@ Data never leaves your environment for LLM analysis: Ollama runs locally. Snowfl
 
 **Give data owners a single source of truth.** The Excel report consolidates technical issues (nulls, duplicate keys) and policy issues (adviser assignment, status vs AUM) into one artifact. Stewards can prioritize by severity instead of piecing together ad-hoc queries.
 
-**Shorten time from finding to fix.** LLM columns explain *why* an issue matters and *what to do*, so analysts and operations teams spend less time translating SQL results into action.
+**Shorten time from finding to fix.** LLM summaries describe each issue in plain language, so analysts and operations teams spend less time translating SQL results into action.
 
-**Keep sensitive data in-house.** Client identifiers and sample rows are analyzed with a local model. There is no cloud LLM API and no need to send production data to a third party.
+**Keep sensitive data in-house.** Client identifiers and issue-row fields are analyzed with a local model. There is no cloud LLM API and no need to send production data to a third party.
 
 **Make governance repeatable.** Rules live in YAML, credentials in environment variables, and each run produces a dated report plus a log file. That supports change control, re-runs after remediations, and evidence for data-governance programs.
 
@@ -84,23 +84,23 @@ Typical stakeholders: data governance, data quality, operations, compliance, and
                 ▼
      Llama 3.2 via Ollama
      - custom-rule SQL generation (when --custom-rules)
-     - table-level summaries (default mode only)
-     - issue-group enrichment (unless --skip-llm)
+     - table summaries for tables with profiling issues
+     - no-findings note for clean tables
+     - per-row LLM_SUMMARY on Row_Issues (unless --skip-llm)
                 │
                 ▼
-     Excel report in output/
+     Excel report in output/  (each sheet formatted as an Excel Table)
      Log file in logs/
 ```
 
 ### 1. Connect and list tables
 
-`SnowflakeClient` authenticates with credentials from `.env`, then lists base tables in `SNOWFLAKE_DATABASE` / `SNOWFLAKE_SCHEMA`. Names in `config/config.yaml` `exclude_tables` are skipped.
+`SnowflakeClient` authenticates from `.env` (password, or RSA key-pair when `SNOWFLAKE_PRIVATE_KEY_PATH` is set), then lists base tables in `SNOWFLAKE_DATABASE` / `SNOWFLAKE_SCHEMA`. Names in `config/config.yaml` `exclude_tables` are skipped.
 
 Primary keys are resolved in this order:
 
-1. Manual override in `config.yaml` (`table_primary_keys`)
-2. Snowflake `SHOW PRIMARY KEYS IN TABLE`
-3. Heuristic (non-nullable column ending in `ID` or `KEY`, else the first column)
+1. Snowflake `SHOW PRIMARY KEYS IN TABLE`
+2. Heuristic (non-nullable column ending in `ID` or `KEY`, else the first column)
 
 ### 2. Generic profiling
 
@@ -109,7 +109,9 @@ For each table, `TableProfiler` measures:
 - Per-column null count, null rate, and distinct count
 - Duplicate primary-key groups (`HAVING COUNT(*) > 1`)
 
-Columns whose null rate exceeds `profiling.null_rate_threshold` (default 5%) become `high_null_rate` issues. Duplicate keys become `duplicate_primary_key` issues with severity **critical**.
+Columns whose null rate exceeds `profiling.null_rate_threshold` (default 5%) become `high_null_rate` findings with `ROW_IDENTIFIER = TABLE_LEVEL` and severity **low**. Those are **table-level** issues: they count on Overview as *Total table-level issues*, appear on **Table_Profiles** / **LLM_Table_Summaries**, and are **omitted** from **Row_Issues**.
+
+Duplicate keys become `duplicate_primary_key` issues with severity **critical**. Each duplicate key value is a **row-level** issue and is listed on **Row_Issues**.
 
 Profiling can be turned off with `rules.run_generic_profiling: false` in `config.yaml`. It is also skipped when you pass `--custom-rules`.
 
@@ -148,25 +150,24 @@ If you do **not** pass `--skip-llm`, the pipeline:
 
 1. Verifies Ollama is running and the configured model is available
 2. Writes a 2–3 sentence quality summary per table that had profiling issues
-3. Groups all issues by type / rule / table and asks the model for:
-   - `LLM_SUMMARY`
-   - `LLM_BUSINESS_IMPACT`
-   - `LLM_RECOMMENDED_FIX`
-   - `LLM_GOVERNANCE_NOTE`
+3. Adds a fixed no-findings sentence for scanned tables with no issues: *No issues were identified in this table as per the given rules.*
+4. Writes a one-sentence `LLM_SUMMARY` on each **Row_Issues** record (TABLE_LEVEL findings are not enriched)
 
-Use `--skip-llm` to skip table summaries and issue-group enrichment. Custom-rule SQL generation still calls Ollama when `--custom-rules` is set.
+Each row summary is built from that row's issue fields only (`ISSUE_TYPE`, `RULE_NAME`, `ISSUE_DETAIL`, `ROW_IDENTIFIER`, and similar). The model must treat `ROW_IDENTIFIER` as the affected record, not as the issue name. Invented identifiers or numbers are discarded and replaced with `{ROW_IDENTIFIER}: {ISSUE_DETAIL}`. Currency symbols and codes (`$`, `£`, `€`, USD, GBP, …) are stripped from AUM and other amounts.
+
+Use `--skip-llm` to skip table summaries and per-row issue enrichment. Custom-rule SQL generation still calls Ollama when `--custom-rules` is set.
 
 ### 6. Excel export
 
-A file is written to `output/dq_governance_report_YYYYMMDD_HHMMSS.xlsx` with sheets:
+A file is written to `output/dq_governance_report_YYYYMMDD_HHMMSS.xlsx`. Every sheet is an Excel Table (autofilter, banded rows, frozen header).
 
 | Sheet | Contents |
 |---|---|
-| **Overview** | Total issues, tables scanned, critical/high counts, generation timestamp |
-| **Rule_Summary** | Issue counts by type, rule name, and severity |
-| **Table_Profiles** | Row count, primary keys, and issue counts per table (empty in `--custom-rules` mode) |
-| **Row_Issues** | Every flagged row or table-level issue, plus LLM columns when enabled |
-| **LLM_Table_Summaries** | Narrative quality summary per table |
+| **Overview** | Total row-level issues, total table-level issues (`high_null_rate`), tables scanned (from **Table_Profiles**), critical/high row-level counts, generation timestamp |
+| **Rule_Summary** | Issue counts by type, rule name, and severity (includes table-level `high_null_rate`) |
+| **Table_Profiles** | Row count, primary keys, and issue counts per table. Empty when profiling is skipped (`--custom-rules` or `run_generic_profiling: false`); Overview *Tables scanned* is then `0` |
+| **Row_Issues** | Row-level issues only (no `TABLE_LEVEL` / `high_null_rate` rows), plus `LLM_SUMMARY` when enabled |
+| **LLM_Table_Summaries** | LLM narrative for tables that had **profiling** issues; scanned tables with no issues get the no-findings sentence. Tables that only have YAML/CSV row findings are not listed here. Empty when `--skip-llm` |
 
 Logs go to `logs/log_YYYYMMDD_HHMMSS.txt`.
 
@@ -260,11 +261,12 @@ Fill Snowflake and Ollama values. `CONDA_ENV_NAME` is used by Cursor/VS Code to 
 | `CONDA_ENV_NAME` | Conda env to activate in Cursor/VS Code terminals (`data_gov_agent` by default; must match `name:` in `environment.yml`) |
 | `SNOWFLAKE_ACCOUNT` | Snowflake account identifier |
 | `SNOWFLAKE_USER` | User name |
-| `SNOWFLAKE_PASSWORD` | Password |
+| `SNOWFLAKE_PASSWORD` | Password (used when no private key is set) |
 | `SNOWFLAKE_WAREHOUSE` | Warehouse to run queries on |
 | `SNOWFLAKE_DATABASE` | Database to scan |
 | `SNOWFLAKE_SCHEMA` | Schema to scan |
 | `SNOWFLAKE_ROLE` | Optional role |
+| `SNOWFLAKE_PRIVATE_KEY_PATH` | Optional path to an RSA `.p8` key (project-relative or absolute). Use this when MFA/passkeys block password login |
 | `OLLAMA_MODEL` | Default `llama3.2` |
 | `OLLAMA_HOST` | Default `http://localhost:11434` |
 
@@ -294,11 +296,12 @@ SNOWFLAKE_SCHEMA=DQ_TEST_SCHEMA
 ### 4. Tune `config/config.yaml`
 
 - `exclude_tables` — skip system or irrelevant tables
-- `table_primary_keys` — override PK detection when Snowflake has no constraint
-- `profiling.null_rate_threshold` — default `0.05` (5%)
+- `profiling.null_rate_threshold` — default `0.05` (5%); columns above this become table-level `high_null_rate` findings
 - `rules.run_generic_profiling` / `rules.run_business_rules` — enable or disable each stage
 - `output.directory` / `output.filename_prefix` — report location and name prefix
-- `llm.temperature` / `llm.max_tokens` — generation settings
+- `llm.temperature` / `llm.max_tokens` — generation settings for Ollama
+
+`config.yaml` also lists `table_primary_keys`, `profiling.duplicate_pk_threshold`, and `profiling.stale_days_threshold`. Those keys are not used: primary keys come from Snowflake `SHOW PRIMARY KEYS` then a heuristic; any duplicate PK is flagged; there is no freshness check.
 
 ### 5. Align `config/rules.yaml` with your schema
 
@@ -323,7 +326,7 @@ python main.py --custom-rules config/custom_rules.csv
 python main.py --custom-rules --skip-llm
 ```
 
-On success the console prints tables scanned, total issues, report path, and log path.
+On success the console prints tables scanned, total issues (the row-level count), report path, and log path.
 
 ### 7. Debug in VS Code / Cursor
 
@@ -387,7 +390,7 @@ Do not put ad-hoc natural-language checks in `rules.yaml`. Use `--custom-rules` 
 
 ## Custom natural-language rules
 
-`--custom-rules` is off by default. When you pass it, the pipeline **does not** run generic profiling (`duplicate_primary_key`, `high_null_rate`) or any SQL in `config/rules.yaml`. Only the CSV rules run. Results still go through the same Excel path (Row_Issues, Rule_Summary, optional `LLM_*` enrichment).
+`--custom-rules` is off by default. When you pass it, the pipeline **does not** run generic profiling (`duplicate_primary_key`, `high_null_rate`) or any SQL in `config/rules.yaml`. Only the CSV rules run. Results still go through the same Excel path (Row_Issues, Rule_Summary, optional per-row `LLM_SUMMARY`). **Table_Profiles** is empty in this mode. **LLM_Table_Summaries** lists targeted tables: those with no CSV-rule hits get the no-findings sentence.
 
 ```bash
 python main.py --custom-rules
@@ -397,7 +400,7 @@ python main.py --custom-rules --skip-llm   # still generates SQL with Ollama; sk
 
 If you omit the path, the default file is `config/custom_rules.csv`.
 
-| Flags | Profiling + `rules.yaml` | CSV → SQL (Ollama) | Table summaries + `LLM_*` columns |
+| Flags | Profiling + `rules.yaml` | CSV → SQL (Ollama) | Table summaries + `LLM_SUMMARY` |
 |---|---|---|---|
 | none | yes | no | yes |
 | `--skip-llm` | yes | no | no |
@@ -456,14 +459,20 @@ Write `rule_text` so every alternative you care about is explicit (for example �
 
 ## Reading the report
 
-Start with **Overview** for volume and severity, then **Rule_Summary** to see which rules fire most. Open **Row_Issues** to remediate specific keys. Use **LLM_Table_Summaries** and the `LLM_*` columns when you need a narrative for a governance pack or ticket.
+Start with **Overview** for volume. *Total row-level issues* matches the **Row_Issues** sheet. *Total table-level issues* is the count of `high_null_rate` / `TABLE_LEVEL` findings (shown on **Table_Profiles** and **LLM_Table_Summaries**, not on **Row_Issues**).
+
+Use **Rule_Summary** to see which rules fire most, then **Row_Issues** to remediate specific keys. Each sheet is an Excel Table, so you can filter and sort from the header row.
+
+On **Row_Issues**, `LLM_SUMMARY` (when LLM is enabled) is a one-sentence paraphrase of that row's `ISSUE_DETAIL` and identifier. The client/record id is the subject of the sentence, not the issue name. Amounts such as AUM are plain numbers with no currency symbol.
+
+Use **LLM_Table_Summaries** for a narrative on tables that had profiling issues, or the no-findings sentence when a scanned table had no issues under the rules that ran. Tables that only produced YAML or CSV row findings do not get a table-level narrative on that sheet.
 
 Severity guide:
 
 - **critical** — identity integrity (duplicate primary keys)
 - **high** — policy or status conflicts that can misstate AUM or retain records that should be gone
 - **medium** — incomplete or invalid reference data (adviser / RM assignment)
-- **low** — completeness signals (high null rates) that may be expected on optional columns
+- **low** — completeness signals (high null rates); table-level only in the default report
 
 ---
 
@@ -471,8 +480,9 @@ Severity guide:
 
 - `.env` is gitignored. Never commit passwords or live account details.
 - `.env.example` is a template only; replace placeholders with your own account.
+- Private keys: `keys/` and `*.p8` are gitignored. Point `SNOWFLAKE_PRIVATE_KEY_PATH` at a local key when Snowflake MFA blocks password login.
 - The pipeline uses warehouse compute. Prefer a dedicated or non-peak warehouse for large schemas.
-- LLM prompts include sample issue rows. Keep Ollama on a machine that is allowed to see that data.
+- LLM prompts include per-row issue fields (identifiers, `ISSUE_DETAIL`, and related values). Keep Ollama on a machine that is allowed to see that data.
 
 ---
 
@@ -482,7 +492,9 @@ Severity guide:
 |---|---|
 | `SNOWFLAKE_DATABASE and SNOWFLAKE_SCHEMA must be set` | Fill both in `.env` |
 | `SNOWFLAKE_ACCOUNT and SNOWFLAKE_USER must be set` | Fill account and user in `.env` |
-| Snowflake auth / warehouse errors | Account identifier, password, role, and that the warehouse is running |
+| Snowflake auth / warehouse errors | Account identifier, password or `SNOWFLAKE_PRIVATE_KEY_PATH`, role, and that the warehouse is running |
+| MFA / passkey login fails for the Python connector | Set `SNOWFLAKE_PRIVATE_KEY_PATH` to a `.p8` key; password auth cannot complete passkey MFA |
+| `SNOWFLAKE_PRIVATE_KEY_PATH does not exist` | Path is resolved from the project root when relative; confirm the `.p8` file is there |
 | `Model 'llama3.2' not found in Ollama` | `ollama pull llama3.2` and confirm `OLLAMA_HOST` |
 | `--custom-rules` fails before Snowflake queries | Ollama must be running; SQL generation is not skipped by `--skip-llm` |
 | `Custom rules file not found` | Pass a real path or keep `config/custom_rules.csv` |
@@ -490,7 +502,7 @@ Severity guide:
 | Custom rule returns fewer rows than expected | Confirm `CUSTOM_RULES_TEST_SCRIPT.sql` has been applied; C001–C015 alone are not enough for `zero_or_negative_aum_active` |
 | Rule appears as `RULE_ERROR` | YAML SQL failed (wrong table/column names). Fix the rule; other rules still ran |
 | Empty report / no tables | Schema name, privileges on `INFORMATION_SCHEMA`, and `exclude_tables` |
-| Slow runs | Large tables: profiling issues one COUNT per column. Use `--skip-llm` or disable profiling while iterating on YAML rules. `--custom-rules` is slower because each rule calls Ollama |
+| Slow runs | Profiling issues one COUNT per column. LLM enrichment is **one Ollama call per Row_Issues row**, plus a call per table that had profiling issues. Use `--skip-llm` or disable profiling while iterating on YAML rules. `--custom-rules` also calls Ollama once per CSV rule for SQL generation |
 | Debugger uses the wrong Python / `ModuleNotFoundError` | Select interpreter `data_gov_agent`, or confirm `.vscode/launch.json` `python` path |
 | `No module named 'debugpy'` | `pip install debugpy` in the conda env, or recreate with `environment.yml` |
 | `conda activate` fails in the terminal | Set `CONDA_ENV_NAME` in `.env` to an env from `conda env list`; start Cursor from an Anaconda Prompt if conda is not on PATH |

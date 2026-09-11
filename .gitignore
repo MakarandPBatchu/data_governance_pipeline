@@ -7,3 +7,5 @@ logs/
 *.xlsx
 .pytest_cache/
 .mypy_cache/
+keys/
+*.p8

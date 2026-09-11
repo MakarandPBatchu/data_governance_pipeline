@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
+from pathlib import Path
 from typing import Any, Generator, Iterable
 
 import pandas as pd
@@ -26,11 +27,15 @@ class SnowflakeClient:
     def connect(self) -> SnowflakeConnection:
         """Open a Snowflake connection (reuses an existing open connection).
 
+        Uses RSA key-pair auth when ``SNOWFLAKE_PRIVATE_KEY_PATH`` is set,
+        otherwise username and password.
+
         Returns:
             Active ``SnowflakeConnection``.
 
         Raises:
-            ValueError: If account or user is missing from settings.
+            ValueError: If account or user is missing from settings, or a configured
+                private-key file does not exist.
         """
         if self._conn is not None and not self._conn.is_closed():
             return self._conn
@@ -42,7 +47,6 @@ class SnowflakeClient:
         connect_kwargs: dict[str, Any] = {
             "account": sf["account"],
             "user": sf["user"],
-            "password": sf["password"],
             "warehouse": sf["warehouse"],
         }
         if sf.get("database"):
@@ -51,6 +55,17 @@ class SnowflakeClient:
             connect_kwargs["schema"] = sf["schema"]
         if sf.get("role"):
             connect_kwargs["role"] = sf["role"]
+
+        private_key_path = (sf.get("private_key_path") or "").strip()
+        if private_key_path:
+            key_file = Path(private_key_path)
+            if not key_file.is_file():
+                raise ValueError(
+                    f"SNOWFLAKE_PRIVATE_KEY_PATH does not exist: {private_key_path}"
+                )
+            connect_kwargs["private_key_file"] = str(key_file)
+        else:
+            connect_kwargs["password"] = sf["password"]
 
         self._conn = snowflake.connector.connect(**connect_kwargs)
         return self._conn
