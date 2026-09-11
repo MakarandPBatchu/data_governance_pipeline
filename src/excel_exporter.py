@@ -46,6 +46,7 @@ class ExcelExporter:
         rule_summary: pd.DataFrame,
         table_profiles: pd.DataFrame,
         llm_table_summaries: pd.DataFrame | None = None,
+        table_level_issue_count: int = 0,
     ) -> Path:
         """Write all pipeline results to a timestamped Excel file.
 
@@ -54,10 +55,11 @@ class ExcelExporter:
         Excel Table with a frozen header row and autofilter.
 
         Args:
-            row_issues: All row-level and table-level issues found.
+            row_issues: Row-level issues for the Row_Issues sheet.
             rule_summary: Issue counts grouped by rule and severity.
             table_profiles: Per-table profiling summary rows.
             llm_table_summaries: Optional LLM narrative per table.
+            table_level_issue_count: TABLE_LEVEL findings (for Overview).
 
         Returns:
             Path to the written ``.xlsx`` file.
@@ -67,7 +69,9 @@ class ExcelExporter:
         output_path = self.output_dir / f"{self.filename_prefix}_{timestamp}.xlsx"
 
         with pd.ExcelWriter(output_path, engine="openpyxl") as writer:
-            overview = self._build_overview(row_issues, rule_summary, table_profiles)
+            overview = self._build_overview(
+                row_issues, rule_summary, table_profiles, table_level_issue_count
+            )
             overview.to_excel(writer, sheet_name="Overview", index=False)
             self._write_sheet(writer, "Rule_Summary", rule_summary)
             self._write_sheet(writer, "Table_Profiles", table_profiles)
@@ -200,18 +204,20 @@ class ExcelExporter:
         row_issues: pd.DataFrame,
         rule_summary: pd.DataFrame,
         table_profiles: pd.DataFrame,
+        table_level_issue_count: int = 0,
     ) -> pd.DataFrame:
         """Build the high-level metrics sheet for the Excel report.
 
         Args:
-            row_issues: All issues found across profiling and business rules.
+            row_issues: Row-level issues shown on the Row_Issues sheet.
             rule_summary: Grouped issue counts (unused directly; kept for future use).
             table_profiles: Per-table profile rows used to count tables scanned.
+            table_level_issue_count: Count of TABLE_LEVEL profile findings.
 
         Returns:
             Two-column DataFrame with Metric and Value columns.
         """
-        total_issues = len(row_issues) if not row_issues.empty else 0
+        row_level_issues_count = len(row_issues) if not row_issues.empty else 0
         tables_scanned = (
             table_profiles["TABLE_NAME"].nunique() if not table_profiles.empty else 0
         )
@@ -228,7 +234,8 @@ class ExcelExporter:
 
         return pd.DataFrame(
             [
-                {"Metric": "Total row-level issues", "Value": total_issues},
+                {"Metric": "Total row-level issues", "Value": row_level_issues_count},
+                {"Metric": "Total table-level issues", "Value": table_level_issue_count},
                 {"Metric": "Tables scanned", "Value": tables_scanned},
                 {"Metric": "Critical issues", "Value": critical},
                 {"Metric": "High severity issues", "Value": high},

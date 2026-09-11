@@ -23,7 +23,8 @@ def main() -> int:
         result = pipeline.run(skip_llm=args.skip_llm, custom_rules_path=args.custom_rules)
         print("\nPipeline complete.")
         print(f"  Tables scanned : {result['tables_scanned']}")
-        print(f"  Total issues   : {result['total_issues']}")
+        print(f"  Total row issues   : {result['total_row_issues']}")
+        print(f"  Total table issues   : {result['total_table_issues']}")
         print(f"  Report         : {result['output_path']}")
         print(f"  Log file       : {log_file}")
         return 0
